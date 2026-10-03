@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 IoT Motor & DHT22 Dashboard</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f4f7fb;color:#172033}
+.container{width:min(950px,92%);margin:30px auto}
+.header{background:linear-gradient(135deg,#0b3954,#087e8b);color:#fff;padding:28px;border-radius:18px;box-shadow:0 10px 25px rgba(0,0,0,.1);margin-bottom:22px}
+.header h1{margin:0 0 8px;font-size:28px}
+.header p{margin:0;opacity:.9}
+.connection{margin-top:18px;display:inline-flex;align-items:center;gap:9px;padding:8px 14px;border-radius:999px;background:rgba(255,255,255,.15);font-weight:bold}
+.dot{width:11px;height:11px;border-radius:50%;background:#f44336}.dot.connected{background:#26c281}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.card,.info{background:#fff;border-radius:18px;padding:24px;box-shadow:0 8px 20px rgba(0,0,0,.07)}
+.card h2,.info h2{margin:0 0 18px;font-size:20px}
+.sensor-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}
+.sensor-box{background:#f1f6fa;border-radius:14px;padding:18px;text-align:center}
+.label{font-size:13px;color:#667085;margin-bottom:8px}
+.value{font-size:31px;font-weight:bold}.unit{font-size:16px;color:#667085}
+.motor-status{text-align:center;font-size:28px;font-weight:bold;padding:20px;border-radius:15px;background:#f4f4f4;margin-bottom:18px}
+.motor-status.on{background:#e9f8ef;color:#16794c}.motor-status.off{background:#fff0f0;color:#b42318}
+.buttons{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+button{border:none;border-radius:12px;padding:16px;font-size:17px;font-weight:bold;cursor:pointer;color:#fff}
+button:disabled{opacity:.45;cursor:not-allowed}.on-btn{background:#1f9d5c}.off-btn{background:#d64545}
+.info{margin-top:22px}.info-row{display:grid;grid-template-columns:150px 1fr;gap:10px;padding:7px 0;border-bottom:1px solid #edf0f3}
+.info-row:last-child{border-bottom:none}.info-label{color:#667085;font-weight:bold}
+.topic{word-break:break-word;font-family:Consolas,monospace;font-size:13px}
+.updated{margin-top:15px;color:#667085;font-size:13px}
+.message{margin-top:16px;padding:12px 14px;border-radius:10px;background:#eef4ff;color:#214e8a;display:none}
+@media(max-width:700px){.grid{grid-template-columns:1fr}.sensor-grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+<h1>ESP32 IoT Control Dashboard</h1>
+<p>Motor control + DHT22 temperature and humidity monitoring</p>
+<div class="connection"><span id="statusDot" class="dot"></span><span id="connectionText">MQTT: Disconnected</span></div>
+</div>
+
+<div class="grid">
+<div class="card">
+<h2>Motor Control</h2>
+<div id="motorStatus" class="motor-status off">MOTOR OFF</div>
+<div class="buttons">
+<button id="onButton" class="on-btn" onclick="setMotor('ON')" disabled>TURN ON</button>
+<button id="offButton" class="off-btn" onclick="setMotor('OFF')" disabled>TURN OFF</button>
+</div>
+<div id="message" class="message"></div>
+</div>
+
+<div class="card">
+<h2>DHT22 Environment</h2>
+<div class="sensor-grid">
+<div class="sensor-box"><div class="label">Temperature</div><div class="value"><span id="temperature">--</span> <span class="unit">°C</span></div></div>
+<div class="sensor-box"><div class="label">Humidity</div><div class="value"><span id="humidity">--</span> <span class="unit">%</span></div></div>
+</div>
+<div id="updated" class="updated">Waiting for DHT22 data...</div>
+</div>
+</div>
+
+<div class="info">
+<h2>MQTT Information</h2>
+<div class="info-row"><div class="info-label">Broker</div><div class="topic">ac21711a.ala.asia-southeast1.emqxsl.com</div></div>
+<div class="info-row"><div class="info-label">WebSocket</div><div class="topic">wss://ac21711a.ala.asia-southeast1.emqxsl.com:8084/mqtt</div></div>
+<div class="info-row"><div class="info-label">Motor Command</div><div class="topic">iot/jai/esp32-001/motor</div></div>
+<div class="info-row"><div class="info-label">Motor Status</div><div class="topic">iot/jai/esp32-001/motor/status</div></div>
+<div class="info-row"><div class="info-label">DHT22 Data</div><div class="topic">iot/jai/esp32-001/temperature</div></div>
+</div>
+</div>
+
+<script>
+const MQTT_BROKER="wss://ac21711a.ala.asia-southeast1.emqxsl.com:8084/mqtt";
+const MQTT_USERNAME="esp32_new";
+const MQTT_PASSWORD="PASSWORD";
+
+const MOTOR_TOPIC="iot/jai/esp32-001/motor";
+const MOTOR_STATUS_TOPIC="iot/jai/esp32-001/motor/status";
+const TEMPERATURE_TOPIC="iot/jai/esp32-001/temperature";
+
+const connectionText=document.getElementById("connectionText");
+const statusDot=document.getElementById("statusDot");
+const onButton=document.getElementById("onButton");
+const offButton=document.getElementById("offButton");
+const motorStatus=document.getElementById("motorStatus");
+const temperature=document.getElementById("temperature");
+const humidity=document.getElementById("humidity");
+const updated=document.getElementById("updated");
+const message=document.getElementById("message");
+
+const client=mqtt.connect(MQTT_BROKER,{
+username:MQTT_USERNAME,
+password:MQTT_PASSWORD,
+keepalive:60,
+reconnectPeriod:3000,
+clean:true
+});
+
+client.on("connect",function(){
+connectionText.textContent="MQTT: Connected";
+statusDot.classList.add("connected");
+onButton.disabled=false;
+offButton.disabled=false;
+showMessage("Connected to EMQX Cloud.");
+
+client.subscribe(MOTOR_STATUS_TOPIC,function(error){
+if(error) console.error("Motor status subscription failed:",error);
+});
+
+client.subscribe(TEMPERATURE_TOPIC,function(error){
+if(error) console.error("Temperature subscription failed:",error);
+});
+});
+
+client.on("reconnect",function(){
+connectionText.textContent="MQTT: Reconnecting...";
+statusDot.classList.remove("connected");
+onButton.disabled=true;
+offButton.disabled=true;
+});
+
+client.on("offline",function(){
+connectionText.textContent="MQTT: Offline";
+statusDot.classList.remove("connected");
+onButton.disabled=true;
+offButton.disabled=true;
+});
+
+client.on("error",function(error){
+console.error("MQTT error:",error);
+connectionText.textContent="MQTT: Error";
+statusDot.classList.remove("connected");
+});
+
+client.on("message",function(topic,payload){
+const messageText=payload.toString();
+
+if(topic===MOTOR_STATUS_TOPIC){
+updateMotorStatus(messageText);
+return;
+}
+
+if(topic===TEMPERATURE_TOPIC){
+try{
+const data=JSON.parse(messageText);
+if(typeof data.temperature!=="undefined" && typeof data.humidity!=="undefined"){
+temperature.textContent=Number(data.temperature).toFixed(2);
+humidity.textContent=Number(data.humidity).toFixed(2);
+updated.textContent="Last update: "+new Date().toLocaleTimeString();
+}
+}catch(error){
+console.error("Invalid DHT JSON:",error);
+}
+}
+});
+
+function setMotor(command){
+if(!client.connected){
+showMessage("MQTT is not connected.");
+return;
+}
+
+client.publish(MOTOR_TOPIC,command,{qos:0,retain:false},function(error){
+if(error){
+showMessage("Command publish failed.");
+console.error(error);
+return;
+}
+showMessage("Motor command sent: "+command);
+});
+}
+
+function updateMotorStatus(status){
+status=status.trim().toUpperCase();
+
+if(status==="ON"){
+motorStatus.textContent="MOTOR ON";
+motorStatus.classList.remove("off");
+motorStatus.classList.add("on");
+}
+else if(status==="OFF"){
+motorStatus.textContent="MOTOR OFF";
+motorStatus.classList.remove("on");
+motorStatus.classList.add("off");
+}
+}
+
+function showMessage(text){
+message.textContent=text;
+message.style.display="block";
+setTimeout(function(){message.style.display="none";},3000);
+}
+</script>
+</body>
+</html>
